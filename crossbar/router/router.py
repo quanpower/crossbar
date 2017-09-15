@@ -32,6 +32,7 @@ from __future__ import absolute_import, division, print_function
 
 import six
 import txaio
+import uuid
 
 from txaio import make_logger
 
@@ -81,8 +82,10 @@ class Router(object):
 
         :param factory: The router factory this router was created by.
         :type factory: Object that implements :class:`autobahn.wamp.interfaces.IRouterFactory`..
+
         :param realm: The realm this router is working for.
         :type realm: str
+
         :param options: Router options.
         :type options: Instance of :class:`crossbar.router.RouterOptions`.
         """
@@ -103,13 +106,24 @@ class Router(object):
         # map: authrole -> set(session)
         self._authrole_to_sessions = {}
 
-        self._broker = self.broker(self, self._options)
-        self._dealer = self.dealer(self, self._options)
+        self._broker = self.broker(self, factory._reactor, self._options)
+        self._dealer = self.dealer(self, factory._reactor, self._options)
         self._attached = 0
 
         self._roles = {
             u'trusted': RouterTrustedRole(self, u'trusted')
         }
+
+        self._is_traced = self._factory._worker and \
+            hasattr(self._factory._worker, '_maybe_trace_rx_msg') and \
+            hasattr(self._factory._worker, '_maybe_trace_tx_msg')
+
+    @property
+    def is_traced(self):
+        return self._is_traced
+
+    def new_correlation_id(self):
+        return six.text_type(uuid.uuid4())
 
     def attach(self, session):
         """
@@ -147,7 +161,12 @@ class Router(object):
 
         # log session details, but skip Crossbar.io internal sessions
         if self.realm != u'crossbar':
-            self.log.info('>>>>> session {session_id} JOINED "{realm}" >>>>>\n\n{details}\n', session_id=details[u'session'], realm=self.realm, details=details)
+            self.log.info(
+                'session "{session_id}" joined realm "{realm}"',
+                session_id=details[u'session'],
+                realm=self.realm,
+            )
+            self.log.debug('{details}', details=details)
 
     def _session_left(self, session, details):
         """
@@ -158,9 +177,27 @@ class Router(object):
 
         # log session details, but skip Crossbar.io internal sessions
         if self.realm != u'crossbar':
-            self.log.info('<<<<<< session {session_id} LEFT "{realm}" <<<<<<\n\n{details}\n', session_id=details[u'session'], realm=self.realm, details=details)
+            self.log.info(
+                'session "{session_id}" left realm "{realm}"',
+                session_id=details[u'session'],
+                realm=self.realm,
+            )
+            self.log.debug('{details}', details=details)
 
-    def detach(self, session):
+    def detach(self, session=None):
+        detached_session_ids = []
+        if session is None:
+            # detach all sessions from router
+            for session in list(self._session_id_to_session.values()):
+                self._detach(session)
+                detached_session_ids.append(session._session_id)
+        else:
+            # detach single session from router
+            self._detach(session)
+            detached_session_ids.append(session._session_id)
+        return detached_session_ids
+
+    def _detach(self, session):
         """
         Implements :func:`autobahn.wamp.interfaces.IRouter.detach`
         """
@@ -177,6 +214,8 @@ class Router(object):
         if not self._attached:
             self._factory.onLastDetach(self)
 
+        return session._session_id
+
     def _check_trace(self, session, msg):
         if not self._trace_traffic:
             return False
@@ -189,8 +228,12 @@ class Router(object):
     def send(self, session, msg):
         if self._check_trace(session, msg):
             self.log.info("<<TX<< {msg}", msg=msg)
+
         if session._transport:
             session._transport.send(msg)
+
+            if self._is_traced:
+                self._factory._worker._maybe_trace_tx_msg(session, msg)
         else:
             self.log.warn('skip sending msg - transport already closed')
 
@@ -200,6 +243,9 @@ class Router(object):
         """
         if self._check_trace(session, msg):
             self.log.info(">>RX>> {msg}", msg=msg)
+
+        if self._is_traced:
+            self._factory._worker._maybe_trace_rx_msg(session, msg)
 
         # Broker
         #
@@ -211,6 +257,9 @@ class Router(object):
 
         elif isinstance(msg, message.Unsubscribe):
             self._broker.processUnsubscribe(session, msg)
+
+        elif isinstance(msg, message.EventReceived):
+            self._broker.processEventReceived(session, msg)
 
         # Dealer
         #
@@ -283,7 +332,7 @@ class Router(object):
         else:
             return False
 
-    def authorize(self, session, uri, action):
+    def authorize(self, session, uri, action, options):
         """
         Authorizes a session for an action on an URI.
 
@@ -299,7 +348,7 @@ class Router(object):
         if role in self._roles:
             # the authorizer procedure of the role which we will call ..
             authorize = self._roles[role].authorize
-            d = txaio.as_future(authorize, session, uri, action)
+            d = txaio.as_future(authorize, session, uri, action, options)
         else:
             # normally, the role should exist on the router (and hence we should not arrive
             # here), but the role might have been dynamically removed - and anyway, safety first!
@@ -350,15 +399,19 @@ class RouterFactory(object):
     The router class this factory will create router instances from.
     """
 
-    def __init__(self, options=None):
+    def __init__(self, worker, options=None):
         """
 
         :param options: Default router options.
         :type options: Instance of :class:`crossbar.router.RouterOptions`.
         """
+        self._worker = worker
         self._routers = {}
         self._options = options or RouterOptions(uri_check=RouterOptions.URI_CHECK_LOOSE)
         self._auto_create_realms = False
+        # XXX this should get passed in from .. somewhere
+        from twisted.internet import reactor
+        self._reactor = reactor
 
     def get(self, realm):
         """
@@ -441,6 +494,16 @@ class RouterFactory(object):
     def stop_realm(self, realm):
         self.log.debug('CrossbarRouterFactory.stop_realm(realm="{realm}")',
                        realm=realm)
+
+        assert(type(realm) == six.text_type)
+
+        if realm not in self._routers:
+            raise Exception('no router started for realm "{}"'.format(realm))
+
+        router = self._routers[realm]
+        detached_sessions = router.detach()
+
+        return detached_sessions
 
     def add_role(self, realm, config):
         self.log.debug('CrossbarRouterFactory.add_role(realm="{realm}", config={config})',

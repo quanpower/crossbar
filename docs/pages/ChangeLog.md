@@ -1,6 +1,21 @@
 title: ChangeLog
 toc: [Documentation, Programming Guide, ChangeLog]
 
+Crossbar.io master (unreleased)
+===============================
+
+* new: router-realm options: enable_meta_api, bridge_meta_api
+
+
+Crossbar 17.4.1 (2017-04-15)
+=============================
+
+* new: MQTT core protocol support in beta
+* new: MQTT payload mapping modes (passthrough, native, dynamic)
+* new: use WAMP payload transparency for MQTT
+* new: Web resource type "nodeinfo"
+
+
 Crossbar 17.3.1 (2017-03-31)
 =============================
 

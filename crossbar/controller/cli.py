@@ -126,9 +126,9 @@ node_default_personality = u'community'
 if u'fabric' in node_classes:
     node_default_personality = u'fabric'
 
-# however, if available, choose "fabricservice" as default
-if u'fabricservice' in node_classes:
-    node_default_personality = u'fabricservice'
+# however, if available, choose "fabriccenter" as default
+if u'fabriccenter' in node_classes:
+    node_default_personality = u'fabriccenter'
 
 
 def check_pid_exists(pid):
@@ -338,12 +338,12 @@ def run_command_version(options, reactor=None, **kwargs):
     except ImportError:
         crossbarfabric_ver = '-'
 
-    # crossbarfabricservice (only Crossbar.io FABRIC CENTER)
+    # crossbarfabriccenter (only Crossbar.io FABRIC CENTER)
     try:
-        import crossbarfabricservice  # noqa
-        crossbarfabricservice_ver = '%s' % pkg_resources.require('crossbarfabricservice')[0].version
+        import crossbarfabriccenter  # noqa
+        crossbarfabriccenter_ver = '%s' % pkg_resources.require('crossbarfabriccenter')[0].version
     except ImportError:
-        crossbarfabricservice_ver = '-'
+        crossbarfabriccenter_ver = '-'
 
     # txaio-etcd (only Crossbar.io FABRIC CENTER)
     try:
@@ -382,10 +382,10 @@ def run_command_version(options, reactor=None, **kwargs):
     log.info("   LMDB             : {ver}", ver=decorate(lmdb_ver))
     log.info("   Python           : {ver}/{impl}", ver=decorate(py_ver), impl=decorate(py_ver_detail))
     log.trace("{pad}{debuginfo}", pad=pad, debuginfo=decorate(py_ver_string))
-    if options.personality in (u'fabric', u'fabricservice'):
+    if options.personality in (u'fabric', u'fabriccenter'):
         log.info(" Crossbar.io Fabric : {ver}", ver=decorate(crossbarfabric_ver))
-    if options.personality == u'fabricservice':
-        log.info(" Crossbar.io FC     : {ver}", ver=decorate(crossbarfabricservice_ver))
+    if options.personality == u'fabriccenter':
+        log.info(" Crossbar.io FC     : {ver}", ver=decorate(crossbarfabriccenter_ver))
         log.debug("   txaioetcd        : {ver}", ver=decorate(txaioetcd_ver))
     log.info(" OS                 : {ver}", ver=decorate(platform.platform()))
     log.info(" Machine            : {ver}", ver=decorate(platform.machine()))
@@ -684,6 +684,7 @@ def run_command_start(options, reactor=None):
     try:
         node.load(options.config)
     except InvalidConfigException as e:
+        log.failure()
         log.error("Invalid node configuration")
         log.error("{e!s}", e=e)
         sys.exit(1)
@@ -1061,6 +1062,7 @@ def run(prog=None, args=None, reactor=None):
                 options.cbdir = '.crossbar'
             else:
                 options.cbdir = '.'
+
         options.cbdir = os.path.abspath(options.cbdir)
 
         # convenience: if --cbdir points to a config file, take
@@ -1068,12 +1070,22 @@ def run(prog=None, args=None, reactor=None):
         if os.path.isfile(options.cbdir):
             options.cbdir = os.path.dirname(options.cbdir)
 
+        # convenience: auto-create directory if not existing
+        if not os.path.isdir(options.cbdir):
+            try:
+                os.mkdir(options.cbdir)
+            except Exception as e:
+                print("Could not create node directory: {}".format(e))
+                sys.exit(1)
+            else:
+                print("Auto-created node directory {}".format(options.cbdir))
+
     # Crossbar.io node configuration file
     #
     if hasattr(options, 'config'):
         # if not explicit config filename is given, try to auto-detect .
         if not options.config:
-            for f in ['config.json', 'config.yaml']:
+            for f in ['config.yaml', 'config.json']:
                 fn = os.path.join(options.cbdir, f)
                 if os.path.isfile(fn) and os.access(fn, os.R_OK):
                     options.config = f
@@ -1090,6 +1102,8 @@ def run(prog=None, args=None, reactor=None):
                 except Exception as e:
                     print("Could not create log directory: {e}".format(e))
                     sys.exit(1)
+                else:
+                    print("Auto-created log directory {}".format(options.logdir))
 
     if not reactor:
         # try and get the log verboseness we want -- not all commands have a
